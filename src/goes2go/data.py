@@ -99,8 +99,9 @@ def _check_param_inputs(**params):
                     if domain in aliases:
                         domain = key
                 product = product + domain
-        if (domain not in _domain) and (domain not in ["M1", "M2"]):
-            raise ValueError(f"domain must be one of {list(_domain.keys())} or an alias {list(_domain.values())}")
+        assert (domain in _domain) or (
+            domain in ["M1", "M2"]
+        ), f"domain must be one of {list(_domain.keys())} or an alias {list(_domain.values())}"
     else:
         domain = None
 
