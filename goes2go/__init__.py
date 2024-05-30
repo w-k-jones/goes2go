@@ -66,6 +66,7 @@ save_dir = "{_save_dir}"
 satellite = "noaa-goes16"
 product = "ABI-L2-MCMIP"
 domain = "C"
+gk2a_domain = "FD"
 download = true
 return_as = "filelist"
 overwrite = false
