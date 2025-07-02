@@ -13,7 +13,7 @@ available in a local directory, it is loaded directly into memory.
 
 https://registry.opendata.aws/noaa-gk2a-pds/
 
-Note that only data from February 2023 is available via AWS
+Note that only data from February 2023 onwards is available via AWS
 """
 
 import multiprocessing
@@ -102,7 +102,8 @@ def _gk2a_file_df(
     start: datetime,
     end: datetime,
     bands: Optional[Union[str, int, list]] = None,
-    refresh: bool = True,
+    refresh: bool = True, 
+    ignore_missing: bool = False, 
 ) -> pd.DataFrame:
     """Get list of requested GK2A AMI files as pandas.DataFrame.
 
@@ -116,6 +117,9 @@ def _gk2a_file_df(
     refresh : bool
         Refresh the s3fs.S3FileSystem object when files are listed.
         Default True will refresh and not use a cached list.
+    ignore_missing : bool
+        If True, errors when trying to search for missing time periods will be 
+        ignored. Default False.
 
     Returns
     -------
@@ -133,9 +137,14 @@ def _gk2a_file_df(
     # ----------------------------
     files = []
     for DATE in DATES:
-        files += fs.ls(
-            f"noaa-gk2a-pds/AMI/L1B/{region}/{DATE:%Y%m/%d/%H/}", refresh=refresh
-        )
+        path = f'noaa-gk2a-pds/AMI/L1B/{region}/{DATE:%Y%m/%d/%H/}'
+        if ignore_missing is True:
+            try:
+                files += fs.ls(path, refresh=refresh)
+            except FileNotFoundError:
+                print(f"Ignored missing dir: {path}")
+        else:
+            files += fs.ls(path, refresh=refresh)
 
     # Build a table of the files
     # --------------------------
@@ -326,6 +335,7 @@ def gk2a_timerange(
     max_cpus=config["timerange"].get("max_cpus"),
     bands=None,
     s3_refresh=config["timerange"].get("s3_refresh"),
+    ignore_missing=config["timerange"].get("ignore_missing"),
     verbose=config["timerange"].get("verbose", True),
 ):
     """
@@ -389,7 +399,9 @@ def gk2a_timerange(
         start = datetime.now(timezone.utc).replace(tzinfo=None) - recent
         end = datetime.now(timezone.utc).replace(tzinfo=None)
 
-    df = _gk2a_file_df(domain, start, end, bands=bands, refresh=s3_refresh)
+    df = _gk2a_file_df(
+        domain, start, end, bands=bands, refresh=s3_refresh, ignore_missing=ignore_missing, 
+    )
 
     if download:
         _download(df, save_dir=save_dir, overwrite=overwrite, verbose=verbose)
