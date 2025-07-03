@@ -79,19 +79,18 @@ def _check_param_inputs(**params):
     # Kinda messy, but gets the job done.
     params.setdefault("verbose", True)
     domain = params["domain"]
-    verbose = params["verbose"]
 
-    ## Determine the Domain (only needed for ABI product)
-    if isinstance(domain, str):
-        domain = domain.upper()
+    ## Determine the Domain
+    if domain not in _gk2a_domain:
+        if isinstance(domain, str):
+            domain = domain.upper()
         for key, aliases in _gk2a_domain.items():
             if domain in aliases:
                 domain = key
         assert (
             domain in _gk2a_domain
         ), f"domain must be one of {list(_gk2a_domain.keys())} or an alias {list(_gk2a_domain.values())}"
-    else:
-        domain = None
+
 
     ## Determine the Product
     return domain
