@@ -125,7 +125,7 @@ def _check_param_inputs(**params):
     return satellite, domain, resolution
 
 
-def _himawari_file_df(satellite, domain, start, end, bands=None, resolution=None, refresh=True, ignore_missing=False):
+def _himawari_file_df(satellite, domain, start, end, bands=None, resolutions=None, refresh=True, ignore_missing=False):
     """Get list of requested GOES files as pandas.DataFrame.
 
     Parameters
@@ -145,13 +145,13 @@ def _himawari_file_df(satellite, domain, start, end, bands=None, resolution=None
     start = pd.to_datetime(start)
     end = pd.to_datetime(end)
 
-    DATES = pd.date_range(f"{start:%Y-%m-%d %H:00}", f"{end:%Y-%m-%d %H:00}", freq="1h")
+    DATES = pd.date_range(f"{start:%Y-%m-%d %H:00}", f"{end:%Y-%m-%d %H:00}", freq="600s")
 
     # List all files for each date
     # ----------------------------
     files = []
     for DATE in DATES:
-        path = f"{satellite}/AHI-L1b-{domain}/{DATE:%Y/%j/%H/}"
+        path = f"{satellite}/AHI-L1b-{domain}/{DATE:%Y/%m/%d/%H%M}"
         if ignore_missing is True:
             try:
                 files += fs.ls(path, refresh=refresh)
@@ -164,9 +164,14 @@ def _himawari_file_df(satellite, domain, start, end, bands=None, resolution=None
     # Build a table of the files
     # --------------------------
     df = pd.DataFrame(files, columns=["file"])
-    df.drop(index=df.index[~df["file"].str.contains(".nc")],inplace=True)
-    df[["product_mode", "satellite", "start", "end", "creation"]] = (
-        df["file"].str.rsplit("_", expand=True, n=5).loc[:, 1:]
+    df.drop(index=df.index[~df["file"].str.contains(".DAT.bz2")],inplace=True)
+    df[["data_format", "satellite", "date", "time", "band", "domain", "resolution", "sector"]] = (
+        df["file"]
+        .str.rsplit("/", expand=True)
+        .iloc[:, -1]
+        .str.rsplit(".", expand=True)
+        .loc[:, 0]
+        .str.rsplit("_", expand=True)
     )
 
     # Filter files by band number
@@ -205,12 +210,10 @@ def _himawari_file_df(satellite, domain, start, end, bands=None, resolution=None
     # Filter files by requested time range
     # ------------------------------------
     # Convert filename datetime string to datetime object
-    df["start"] = pd.to_datetime(df.start, format="s%Y%j%H%M%S%f")
-    df["end"] = pd.to_datetime(df.end, format="e%Y%j%H%M%S%f")
-    df["creation"] = pd.to_datetime(df.creation, format="c%Y%j%H%M%S%f.nc")
+    df["time"] = pd.to_datetime(df.date + df.time, format="%Y%m%d%H%M")
 
     # Filter by files within the requested time range
-    df = df.loc[df.start >= start].loc[df.end <= end].reset_index(drop=True)
+    df = df.loc[df.time >= start].loc[df.time < end].reset_index(drop=True)
 
     for i in params:
         df.attrs[i] = params[i]
