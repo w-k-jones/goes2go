@@ -16,18 +16,12 @@ available in a local directory, it is loaded directly into memory.
 https://registry.opendata.aws/noaa-goes/
 """
 
-import multiprocessing
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
-from functools import partial
-from pathlib import Path
 
-import numpy as np
 import pandas as pd
 import s3fs
-import xarray as xr
 
-from goes2go.tools import lat_lon_to_scan_angles
+from goes2go.data import _download
 
 # NOTE: These config dict values are retrieved from __init__ and read
 # from the file ${HOME}/.config/goes2go/config.toml
@@ -145,7 +139,10 @@ def _himawari_file_df(satellite, domain, start, end, bands=None, resolutions=Non
     start = pd.to_datetime(start)
     end = pd.to_datetime(end)
 
-    DATES = pd.date_range(f"{start:%Y-%m-%d %H:00}", f"{end:%Y-%m-%d %H:00}", freq="600s")
+    start_floor = start.floor("10min")
+    end_floor = end.floor("10min")
+
+    DATES = pd.date_range(start_floor, end_floor, freq="10min")
 
     # List all files for each date
     # ----------------------------
@@ -159,7 +156,7 @@ def _himawari_file_df(satellite, domain, start, end, bands=None, resolutions=Non
                 print(f"Ignored missing dir: {path}")
         else:
             files += fs.ls(path, refresh=refresh)
-
+    
 
     # Build a table of the files
     # --------------------------
@@ -221,36 +218,6 @@ def _himawari_file_df(satellite, domain, start, end, bands=None, resolutions=Non
     return df
 
 
-def _download(df, save_dir, overwrite, max_threads=10, verbose=False):
-    """Download the files from a DataFrame listing with multithreading."""
-
-    def do_download(src):
-        dst = Path(save_dir) / src
-        if not dst.parent.is_dir():
-            dst.parent.mkdir(parents=True, exist_ok=True)
-        if dst.is_file() and not overwrite:
-            if verbose:
-                print(f" 👮🏻‍♂️ File already exists. Do not overwrite: {dst}")
-        else:
-            # Downloading file from AWS
-            fs.get(src, str(dst))
-
-    ################
-    # Multithreading
-    tasks = len(df)
-    threads = min(tasks, max_threads)
-
-    with ThreadPoolExecutor(threads) as exe:
-        futures = [exe.submit(do_download, src) for src in df.file]
-
-        # nothing is returned in the list
-        this_list = [future.result() for future in as_completed(futures)]
-
-    print(
-        f"📦 Finished downloading [{len(df)}] files to [{save_dir/Path(df.file[0]).parents[3]}]."
-    )
-
-
 ###############################################################################
 ###############################################################################
 
@@ -260,21 +227,21 @@ def himawari_timerange(
     end=None,
     recent=None,
     *,
-    satellite=config["timerange"].get("satellite"),
-    product=config["timerange"].get("product"),
-    domain=config["timerange"].get("domain"),
+    satellite=config["timerange"].get("himawari_satellite"),
+    domain=config["timerange"].get("himawari_domain"),
     return_as=config["timerange"].get("return_as"),
     download=config["timerange"].get("download"),
     overwrite=config["timerange"].get("overwrite"),
     save_dir=config["timerange"].get("save_dir"),
     max_cpus=config["timerange"].get("max_cpus"),
-    bands=None,
+    bands=None, 
+    resolution=None,
     s3_refresh=config["timerange"].get("s3_refresh"),
     ignore_missing=config["timerange"].get("ignore_missing"),
     verbose=config["timerange"].get("verbose", True),
 ):
     """
-    Get GOES data for a time range.
+    Get Himawari AHI data for a time range.
 
     Parameters
     ----------
@@ -283,33 +250,18 @@ def himawari_timerange(
     recent : timedelta or pandas-parsable timedelta str
         Required if start and end are None. If timedelta(hours=1), will
         get the most recent files for the past hour.
-    satellite : {'goes16', 'goes17', 'goes18'}
-        Specify which GOES satellite.
+    satellite : {'himawari8', 'himawari9'}
+        Specify which Himawari satellite.
         The following alias may also be used:
 
-        - ``'goes16'``: 16, 'G16', or 'EAST'
-        - ``'goes17'``: 17, 'G17', or 'WEST'
-        - ``'goes18'``: 18, 'G18', or 'WEST'
-
-    product : {'ABI', 'GLM', other GOES product}
-        Specify the product name.
-
-        - 'ABI' is an alias for ABI-L2-MCMIP Multichannel Cloud and Moisture Imagery
-        - 'GLM' is an alias for GLM-L2-LCFA Geostationary Lightning Mapper
-
-        Others may include ``'ABI-L1b-Rad'``, ``'ABI-L2-DMW'``, etc.
-        For more available products, look at this `README
-        <https://docs.opendata.aws/noaa-goes16/cics-readme.html>`_
-    domain : {'C', 'F', 'M'}
-        ABI scan region indicator. Only required for ABI products if the
-        given product does not end with C, F, or M.
-
-        - C: Contiguous United States (alias 'CONUS')
-        - F: Full Disk (alias 'FULL')
-        - M: Mesoscale (alias 'MESOSCALE')
-
+        - ```himawari8```: 8, "8", "H8", "HIMAWARI8", or "HIMAWARI-8"
+        - ```himawari9```: 9, "9", "H9", "HIMAWARI9", or "HIMAWARI-9"
+    
+    domain : {'Japan', 'FLDK', 'Target'}
+        AHI scan region indicator. 
     return_as : {'xarray', 'filelist'}
-        Return the data as an xarray.Dataset or as a list of files
+        Return the data as an xarray.Dataset or as a list of files. Note, xarray 
+        return not yet implemented.
     download : bool
         - True: Download the data to disk to the location set by :guilabel:`save_dir`
         - False: Just load the data into memory.
@@ -319,8 +271,11 @@ def himawari_timerange(
         - True: Download the file even if it exists.
         - False Do not download the file if it already exists
     max_cpus : int
-    bands : None, int, or list
-        ONLY FOR L1b-Rad products; specify the bands you want
+    bands : None, int, str, or list
+        Specify the bands you want, if None will find all bands.
+    resolution : None, int, str or list
+        Specify which resolution you want (0.5, 1 or 2 km). If None will return 
+        the highest resolution available for each band.
     s3_refresh : bool
         Refresh the s3fs.S3FileSystem object when files are listed.
 
@@ -335,10 +290,7 @@ def himawari_timerange(
         recent = pd.to_timedelta(recent)
 
     params = locals()
-    satellite, product, domain = _check_param_inputs(**params)
-    params["satellite"] = satellite
-    params["product"] = product
-    params["domain"] = domain
+    satellite, domain, resolution = _check_param_inputs(**params)
 
     check1 = start is not None and end is not None
     check2 = recent is not None
@@ -359,7 +311,7 @@ def himawari_timerange(
         start = datetime.utcnow() - recent
         end = datetime.utcnow()
 
-    df = _himawari_file_df(satellite, product, start, end, bands=bands, refresh=s3_refresh, ignore_missing=ignore_missing)
+    df = _himawari_file_df(satellite, domain, start, end, bands=bands, resolutions=resolution, refresh=s3_refresh, ignore_missing=ignore_missing)
 
     if download:
         _download(df, save_dir=save_dir, overwrite=overwrite, verbose=verbose)
@@ -371,21 +323,6 @@ def himawari_timerange(
         raise ValueError("xarray return not yet enabled for AHI")
         # return _as_xarray(df, **params)
 
-def _preprocess_single_point(ds, target_lat, target_lon, decimal_coordinates=True):
-    """
-    Preprocessing function to select only the single relevant data subset.
-
-    Parameters
-    ----------
-    ds: xarray Dataset
-        The dataset to look through and choose the particular location
-    target_lat, target_lon : float
-        Location where you wish to extract the point values from
-    decimal_coordinates: bool
-        If latitude/longitude are specified in decimal or radian coordinates.
-    """
-    x_target, y_target = lat_lon_to_scan_angles(target_lat, target_lon, ds["goes_imager_projection"], decimal_coordinates)
-    return ds.sel(x=x_target, y=y_target, method="nearest")
 
 def himawari_single_point_timerange(
     latitude,
