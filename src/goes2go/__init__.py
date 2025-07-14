@@ -64,9 +64,11 @@ default_toml = f""" # GOES-2-go Defaults
 ["default"]
 save_dir = "{_save_dir}"
 satellite = "noaa-goes19"
+himawari_satellite = "noaa-himawari8"
 product = "ABI-L2-MCMIP"
 domain = "C"
 gk2a_domain = "FD"
+himawari_domain = "FLDK"
 download = true
 return_as = "filelist"
 overwrite = false
