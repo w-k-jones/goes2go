@@ -16,11 +16,11 @@ available in a local directory, it is loaded directly into memory.
 https://registry.opendata.aws/noaa-goes/
 """
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 import s3fs
-
+from pandas._typing import TimestampConvertibleTypes, TimedeltaConvertibleTypes
 from goes2go.data import _download
 
 # NOTE: These config dict values are retrieved from __init__ and read
@@ -44,9 +44,9 @@ _himawari_domain = {
 }
 
 _himawari_resolution = {
-    "R05": [0.5, 500, "0.5", "500"], 
-    "R10": [1, 1000, "1", "1000"], 
-    "R20": [2, 2000, "2", "2000"], 
+    "R05": [0.5, 5, 500, "0.5", "5", "500"], 
+    "R10": [1, 10, 1000, "1", "10", "1000"], 
+    "R20": [2, 20, 2000, "2", "20", "2000"], 
 }
 
 _himawari_bands = dict(
@@ -69,9 +69,263 @@ _himawari_bands = dict(
             "B15",
             "B16",
         ],
-        range(1, 16 + 1),
+        list(zip(range(1, 16 + 1))),
     )
 )
+
+
+def _check_parameter_single(param, valid_options):
+    if param not in valid_options:
+        if isinstance(param, str):
+            param = str(param).upper()
+        for key, aliases in valid_options.items():
+            if param in aliases:
+                param = key
+        if param not in valid_options:
+            raise ValueError(f"Invalid parameter: {param}; must be one of {list(valid_options.keys())} or an alias {list(valid_options.values())}")
+    
+    return param
+
+def _check_parameter_multi(params, valid_options):
+    if params is not None:
+        if not hasattr(params, "__len__") or isinstance(params, (str, bytes, bytearray)):
+            params = [params]
+        for i, param in enumerate(params):
+            if param not in valid_options:
+                for k, v in valid_options.items():
+                    if param in v:
+                        params[i] = k
+                        break
+                else:
+                    raise ValueError(f"Invalid parameter: {param}; must be one of {list(valid_options.keys())} or an alias {list(valid_options.values())}")
+    return params
+
+class Himawari:
+    """The Himawari satellite class."""
+    def __init__(
+        self, 
+        satellite=config["timerange"].get("himawari_satellite"),
+        domain=config["timerange"].get("himawari_domain"),
+        bands=None,
+        channel=None,
+        resolution=None,
+    ):
+        self.satellite = satellite
+        self.domain = domain
+        self.bands = channel if bands is None else bands
+        self.resolution = resolution
+
+    # ----------------------------------------------
+    # Property setters/getters for validating inputs
+    # ----------------------------------------------
+
+    @property
+    def satellite(self):
+        return self._satellite
+    @satellite.setter
+    def satellite(self, value):
+        self._satellite = _check_parameter_single(value, _himawari_satellite)
+
+    @property
+    def domain(self):
+        return self._domain
+    @domain.setter
+    def domain(self, value):
+        self._domain = _check_parameter_single(value, _himawari_domain)
+
+    @property
+    def bands(self):
+        return self._bands
+    @bands.setter
+    def bands(self, value):
+        if value is None:
+            self._bands = None
+        else:
+            self._bands = _check_parameter_multi(value, _himawari_bands)
+
+    @property
+    def resolution(self):
+        return self._resolution
+    @resolution.setter
+    def resolution(self, value):
+        if value is None:
+            self._resolution = None
+        else:
+            self._resolution = _check_parameter_multi(value, _himawari_resolution)
+
+    
+    def __repr__(self):
+        msg = [
+            "╭───────────────────────────────╌┄┈",
+            "│ 🌎 Himawari Object   ",
+            "│ ──────────────────",
+            f"│  {self.satellite=}",
+            f"│  {self.domain=}",
+            f"│  {self.bands=}",
+            f"│  {self.resolution=}",
+            "╰───────────────────────────────╌┄┈",
+        ]
+        return "\n".join(msg)
+    
+    def df(
+        self, 
+        start: TimestampConvertibleTypes, 
+        end: TimestampConvertibleTypes, 
+        refresh=config["latest"].get("s3_refresh"),
+        ignore_missing=config["latest"].get("ignore_missing"),
+    ) -> pd.DataFrame:
+        """Get list of requested Himawari AHI files as pandas.DataFrame.
+
+        Parameters
+        ----------
+        start : datetime
+        end : datetime
+        refresh : bool
+            Refresh the s3fs.S3FileSystem object when files are listed.
+            Default True will refresh and not use a cached list.
+        ignore_missing : bool
+            Ignore FileNotFoundError if there is missing data from
+            a satellite outage.
+        """
+        start = pd.to_datetime(start)
+        end = pd.to_datetime(end)
+        
+        # List all files for each date
+        # ----------------------------
+        files = []
+        for DATE in pd.date_range(start.floor("10min"), end.floor("10min"), freq="10min"):
+            path = f"{self.satellite}/AHI-L1b-{self.domain}/{DATE:%Y/%m/%d/%H%M}"
+            if ignore_missing is True:
+                try:
+                    files += fs.ls(path, refresh=refresh)
+                except FileNotFoundError:
+                    print(f"Ignored missing dir: {path}")
+            else:
+                files += fs.ls(path, refresh=refresh)
+
+
+        # Build a table of the files
+        # --------------------------
+        df = pd.DataFrame(files, columns=["file"])
+        df.drop(index=df.index[~df["file"].str.contains(".DAT.bz2")],inplace=True)
+        df[["data_format", "satellite", "date", "time", "band", "domain", "resolution", "sector"]] = (
+            df["file"]
+            .str.rsplit("/", expand=True)
+            .iloc[:, -1]
+            .str.rsplit(".", expand=True)
+            .loc[:, 0]
+            .str.rsplit("_", expand=True)
+        )
+
+        # Filter files by band number
+        # ---------------------------
+        if self.bands is not None:
+            df = df.loc[df.band.isin(self.bands)]
+
+        # Filter files by resolution
+        # --------------------------
+        if self.resolution is not None:
+            df = df.loc[df.resolution.isin(self.resolution)]
+        else:
+            # If None pick the highest resolution for each
+            df = df.loc[df.resolution == df.groupby("band").resolution.unique().str[0][df.band].to_numpy()]
+        
+        # Filter files by requested time range
+        # ------------------------------------
+        # Convert filename datetime string to datetime object
+        df["time"] = pd.to_datetime(df.date + df.time, format="%Y%m%d%H%M")
+
+        # Filter by files within the requested time range
+        df = df.loc[df.time >= start].loc[df.time < end].reset_index(drop=True)
+
+        # for i in params:
+        #     df.attrs[i] = params[i]
+
+        return df
+    
+        
+    def latest(
+        self,
+        return_as=config["latest"].get("return_as"),
+        download=config["latest"].get("download"),
+        overwrite=config["latest"].get("overwrite"),
+        save_dir=config["latest"].get("save_dir"),
+        s3_refresh=config["latest"].get("s3_refresh"),
+        ignore_missing=config["latest"].get("ignore_missing"),
+        verbose=config["latest"].get("verbose", True),
+    ):
+        """Get the latest available Himawari AHI data."""
+
+        start = datetime.now(timezone.utc) - timedelta(hours=1)
+        end = datetime.now(timezone.utc)
+
+        df = self.df(start, end, refresh=s3_refresh, ignore_missing=ignore_missing)
+
+        # Select the most recent
+        df = df.sort_values(by="time").last()
+
+        if download:
+            _download(df, save_dir=save_dir, overwrite=overwrite, verbose=verbose)
+
+        if return_as == "filelist":
+            df.attrs["filePath"] = save_dir
+            return df
+        elif return_as == "satpy":
+            raise NotImplementedError("Satpy output not yet implemented")
+
+        elif return_as == "xarray":
+            raise NotImplementedError("xarray output not yet implemented")
+        
+    
+    def timerange(
+        self, 
+        start: TimestampConvertibleTypes = None, 
+        end: TimestampConvertibleTypes = None, 
+        recent: TimedeltaConvertibleTypes = None, 
+        return_as=config["latest"].get("return_as"),
+        download=config["latest"].get("download"),
+        overwrite=config["latest"].get("overwrite"),
+        save_dir=config["latest"].get("save_dir"),
+        max_cpus=config["timerange"].get("max_cpus"),
+        s3_refresh=config["latest"].get("s3_refresh"),
+        ignore_missing=config["latest"].get("ignore_missing"),
+        verbose=config["latest"].get("verbose", True),
+    ):
+        """Get Himawari data for a time range.
+
+        Parameters
+        ----------
+        start, end : datetime
+            Required if recent is None.
+        recent : timedelta or pandas-parsable timedelta str
+            Required if start and end are None. If timedelta(hours=1), will
+            get the most recent files for the past hour.
+        """
+
+        # Check start/end or recent inputs
+        if start is not None and end is not None:
+            start = pd.to_datetime(start)
+            end = pd.to_datetime(end)
+        elif recent is not None:
+            recent = pd.to_timedelta(recent)
+            start = datetime.now(timezone.utc) - recent
+            end = datetime.now(timezone.utc)
+        else:
+            raise ValueError("🤔 `start` and `end` *or* `recent` is required")
+        
+        df = self.df(start, end, refresh=s3_refresh, ignore_missing=ignore_missing)
+
+        if return_as == "filelist":
+            df.attrs["filePath"] = save_dir
+            return df
+        elif return_as == "satpy":
+            raise NotImplementedError("Satpy output not yet implemented")
+
+        elif return_as == "xarray":
+            raise NotImplementedError("xarray output not yet implemented")
+
+
+
 
 def _check_param_inputs(**params):
     """Check the input parameters for correct name or alias.
@@ -156,7 +410,7 @@ def _himawari_file_df(satellite, domain, start, end, bands=None, resolutions=Non
                 print(f"Ignored missing dir: {path}")
         else:
             files += fs.ls(path, refresh=refresh)
-    
+
 
     # Build a table of the files
     # --------------------------

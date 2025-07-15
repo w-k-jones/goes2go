@@ -16,16 +16,13 @@ https://registry.opendata.aws/noaa-gk2a-pds/
 Note that only data from February 2023 onwards is available via AWS
 """
 
-import multiprocessing
-from concurrent.futures import ThreadPoolExecutor, as_completed, wait
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from typing import Optional, Union
 
-import numpy as np
 import pandas as pd
 import s3fs
-import xarray as xr
+
+from goes2go.data import _as_xarray, _download
 
 # NOTE: These config dict values are retrieved from __init__ and read
 # from the file ${HOME}/.config/goes2go/config.toml
@@ -185,136 +182,6 @@ def _gk2a_file_df(
         df.attrs[i] = params[i]
 
     return df
-
-
-def _download(
-    df: pd.DataFrame,
-    save_dir: str,
-    overwrite: bool,
-    max_threads: int = 10,
-    verbose: bool = False,
-) -> None:
-    """Download the files from a DataFrame listing with multithreading."""
-
-    def do_download(src):
-        dst = Path(save_dir) / src
-        if not dst.parent.is_dir():
-            dst.parent.mkdir(parents=True, exist_ok=True)
-        if dst.is_file() and not overwrite:
-            if verbose:
-                print(f" 👮🏻‍♂️ File already exists. Do not overwrite: {dst}")
-        else:
-            # Downloading file from AWS
-            fs.get(src, str(dst))
-
-    ################
-    # Multithreading
-    tasks = len(df)
-    threads = min(tasks, max_threads)
-
-    with ThreadPoolExecutor(threads) as exe:
-        futures = [exe.submit(do_download, src) for src in df.file]
-
-        # nothing is returned in the list
-        this_list = [future.result() for future in as_completed(futures)]
-
-    print(
-        f"📦 Finished downloading [{len(df)}] files to [{save_dir/Path(df.file[0]).parents[3]}]."
-    )
-
-
-def _as_xarray_MP(
-    src: str,
-    save_dir: str,
-    i: Optional[int] = None,
-    n: Optional[int] = None,
-    verbose: bool = True,
-) -> xr.Dataset:
-    """Open a file as a xarray.Dataset -- a multiprocessing helper."""
-
-    # File destination
-    local_copy = Path(save_dir) / src
-
-    if local_copy.is_file():
-        if verbose:
-            print(
-                f"\r📖💽 Reading ({i:,}/{n:,}) file from LOCAL COPY [{local_copy}].",
-                end=" ",
-            )
-        with open(local_copy, "rb") as f:
-            ds = xr.load_dataset(f)
-    else:
-        if verbose:
-            print(
-                f"\r📖☁ Reading ({i:,}/{n:,}) file from AWS to MEMORY [{src}].", end=" "
-            )
-        with fs.open(src, "rb") as f:
-            ds = xr.load_dataset(f)
-
-    # Turn some attributes to coordinates so they will be preserved
-    # when we concat multiple GOES DataSets together.
-    attr2coord = [
-        "dataset_name",
-        "date_created",
-        "time_coverage_start",
-        "time_coverage_end",
-    ]
-    for i in attr2coord:
-        if i in ds.attrs:
-            ds.coords[i] = ds.attrs.pop(i)
-
-    ds["filename"] = src
-
-    return ds
-
-
-def _as_xarray(df: pd.DataFrame, **params) -> xr.Dataset:
-    """Download files in the list to the desired path.
-
-    Use multiprocessing to speed up the download process.
-
-    Parameters
-    ----------
-    df : pandas.DataFrame
-        A list of files in the GOES s3 bucket.
-        This DataFrame must have a column of "files"
-    params : dict
-        Parameters from `goes_*` function.
-    """
-    params.setdefault("max_cpus", None)
-    params.setdefault("verbose", True)
-    save_dir = params["save_dir"]
-    max_cpus = params["max_cpus"]
-    verbose = params["verbose"]
-
-    n = len(df.file)
-    if n == 0:
-        print("🛸 No data....🌌")
-    elif n == 1:
-        # If we only have one file, we don't need multiprocessing
-        ds = _as_xarray_MP(df.iloc[0].file, save_dir, 1, 1, verbose)
-    else:
-        # Use Multiprocessing to read multiple files.
-        if max_cpus is None:
-            max_cpus = multiprocessing.cpu_count()
-        cpus = np.minimum(multiprocessing.cpu_count(), max_cpus)
-        cpus = np.minimum(cpus, n)
-
-        inputs = [(src, save_dir, i, n) for i, src in enumerate(df.file, start=1)]
-
-        with multiprocessing.Pool(cpus) as p:
-            results = p.starmap(_as_xarray_MP, inputs)
-            p.close()
-            p.join()
-
-        # Need some work to concat the datasets
-        print("concatenate Datasets", end="")
-        ds = xr.concat(results, dim="t")
-
-    if verbose:
-        print(f"\r{'':1000}\r📚 Finished reading [{n}] files into xarray.Dataset.")
-    ds.attrs["path"] = df.file.to_list()
-    return ds
 
 
 ###############################################################################
